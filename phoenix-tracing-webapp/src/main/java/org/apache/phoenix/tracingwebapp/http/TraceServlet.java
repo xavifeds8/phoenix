@@ -31,7 +31,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.query.QueryServicesOptions;
-import org.apache.phoenix.util.JacksonUtil;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
  * Server to show trace information
@@ -39,6 +39,7 @@ import org.apache.phoenix.util.JacksonUtil;
 public class TraceServlet extends HttpServlet {
 
   private static final long serialVersionUID = -354285100083055559L;
+  private static final ObjectMapper objectMapper = new ObjectMapper();
   private static Connection con;
   protected String DEFAULT_LIMIT = "25";
   protected String DEFAULT_COUNTBY = "hostname";
@@ -160,7 +161,7 @@ public class TraceServlet extends HttpServlet {
         con = ConnectionFactory.getConnection();
         EntityFactory nutrientEntityFactory = new EntityFactory(con, sqlQuery);
         List<Map<String, Object>> nutrients = nutrientEntityFactory.findMultiple();
-        json = JacksonUtil.getObjectWriter().writeValueAsString(nutrients);
+        json = objectMapper.writeValueAsString(nutrients);
       } catch (Exception e) {
         json = "{error:true,msg:'Server Error:" + e.getMessage() + "'}";
       } finally {
