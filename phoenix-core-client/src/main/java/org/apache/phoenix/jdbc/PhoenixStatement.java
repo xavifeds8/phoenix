@@ -1912,6 +1912,10 @@ public class PhoenixStatement implements PhoenixMonitoredStatement, SQLCloseable
     }
   }
 
+  /**
+   * @deprecated TRACE ON/OFF are deprecated no-ops. Use the OpenTelemetry Java Agent instead.
+   */
+  @Deprecated
   private static class ExecutableTraceStatement extends TraceStatement
     implements CompilableStatement {
 

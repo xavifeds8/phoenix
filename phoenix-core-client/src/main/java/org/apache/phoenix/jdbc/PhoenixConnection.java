@@ -26,8 +26,6 @@ import static org.apache.phoenix.query.QueryServices.QUERY_SERVICES_NAME;
 import static org.apache.phoenix.thirdparty.com.google.common.base.Preconditions.checkArgument;
 import static org.apache.phoenix.thirdparty.com.google.common.base.Preconditions.checkNotNull;
 
-import io.opentelemetry.api.trace.Span;
-import io.opentelemetry.context.Scope;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.PrintStream;
@@ -168,8 +166,6 @@ public class PhoenixConnection
   private final String timePattern;
   private final String timestampPattern;
   private int statementExecutionCounter;
-  private Span traceSpan = null;
-  private Scope traceScope = null;
   private volatile boolean isClosed = false;
   private volatile boolean isClosing = false;
   private boolean readOnly = false;
@@ -821,12 +817,6 @@ public class PhoenixConnection
         if (childConnections != null) {
           SQLCloseables.closeAllQuietly(childConnections);
         }
-        if (traceScope != null) {
-          traceScope.close();
-        }
-        if (traceSpan != null) {
-          traceSpan.end();
-        }
       } finally {
         services.removeConnection(this);
       }
@@ -1353,22 +1343,6 @@ public class PhoenixConnection
       connectionActivityLogger.log(ActivityLogInfo.OP_STMTS,
         String.valueOf(statementExecutionCounter));
     }
-  }
-
-  public Span getTraceSpan() {
-    return traceSpan;
-  }
-
-  public Scope getTraceScope() {
-    return traceScope;
-  }
-
-  public void setTraceSpan(Span traceSpan) {
-    this.traceSpan = traceSpan;
-  }
-
-  public void setTraceScope(Scope traceScope) {
-    this.traceScope = traceScope;
   }
 
   @Override

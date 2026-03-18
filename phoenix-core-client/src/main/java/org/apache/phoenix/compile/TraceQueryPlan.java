@@ -19,7 +19,6 @@ package org.apache.phoenix.compile;
 
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanContext;
-import io.opentelemetry.context.Scope;
 import java.sql.ParameterMetaData;
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -42,7 +41,6 @@ import org.apache.phoenix.expression.RowKeyColumnExpression;
 import org.apache.phoenix.iterate.DefaultParallelScanGrouper;
 import org.apache.phoenix.iterate.ParallelScanGrouper;
 import org.apache.phoenix.iterate.ResultIterator;
-import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixStatement;
 import org.apache.phoenix.jdbc.PhoenixStatement.Operation;
 import org.apache.phoenix.metrics.MetricInfo;
@@ -62,13 +60,38 @@ import org.apache.phoenix.schema.TableRef;
 import org.apache.phoenix.schema.tuple.ResultTuple;
 import org.apache.phoenix.schema.tuple.Tuple;
 import org.apache.phoenix.schema.types.PLong;
-import org.apache.phoenix.trace.PhoenixTracing;
 import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.PhoenixKeyValueUtil;
 import org.apache.phoenix.util.SizedUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+/**
+ * Query plan for the {@code TRACE ON} / {@code TRACE OFF} SQL commands.
+ * <p>
+ * <b>Deprecated:</b> The TRACE ON/OFF SQL mechanism is a legacy anti-pattern from the HTrace era.
+ * With OpenTelemetry, tracing is always-on and controlled by sampling at the infrastructure level
+ * (via {@code OTEL_TRACES_SAMPLER}), not per-connection via SQL commands. Users should use the
+ * OpenTelemetry Java Agent for automatic tracing instead.
+ * </p>
+ * <p>
+ * For backward compatibility, {@code TRACE ON} is now a no-op that returns the current trace ID if
+ * an active OTel span exists (e.g., from the Java Agent), or 0 if no span is active.
+ * {@code TRACE OFF} is also a no-op that returns 0. No spans are created or stored on the
+ * connection.
+ * </p>
+ * @deprecated Use the OpenTelemetry Java Agent for automatic tracing. TRACE ON/OFF are no-ops.
+ */
+@Deprecated
 public class TraceQueryPlan implements QueryPlan {
+
+  private static final Logger LOG = LoggerFactory.getLogger(TraceQueryPlan.class);
+
+  /**
+   * Log the deprecation warning at most once per JVM to avoid log spam.
+   */
+  private static volatile boolean deprecationWarningLogged = false;
 
   private TraceStatement traceStatement = null;
   private PhoenixStatement stmt = null;
@@ -124,11 +147,8 @@ public class TraceQueryPlan implements QueryPlan {
 
   @Override
   public ResultIterator iterator(ParallelScanGrouper scanGrouper) throws SQLException {
-    final PhoenixConnection conn = stmt.getConnection();
-    if (conn.getTraceSpan() == null && !traceStatement.isTraceOn()) {
-      return ResultIterator.EMPTY_ITERATOR;
-    }
-    return new TraceQueryResultIterator(conn);
+    logDeprecationWarning();
+    return new TraceQueryResultIterator();
   }
 
   @Override
@@ -241,13 +261,22 @@ public class TraceQueryPlan implements QueryPlan {
     return true;
   }
 
-  private class TraceQueryResultIterator implements ResultIterator {
-
-    private final PhoenixConnection conn;
-
-    public TraceQueryResultIterator(PhoenixConnection conn) {
-      this.conn = conn;
+  private static void logDeprecationWarning() {
+    if (!deprecationWarningLogged) {
+      deprecationWarningLogged = true;
+      LOG.warn("TRACE ON/OFF SQL commands are deprecated and are "
+        + "now no-ops. Tracing is automatically handled by the "
+        + "OpenTelemetry Java Agent. Configure sampling via "
+        + "OTEL_TRACES_SAMPLER environment variable. "
+        + "See https://phoenix.apache.org/tracing.html " + "for details.");
     }
+  }
+
+  /**
+   * Result iterator that returns the current OTel trace ID (if any active span exists) without
+   * creating or managing any spans. This is a backward-compatible no-op.
+   */
+  private class TraceQueryResultIterator implements ResultIterator {
 
     @Override
     public void close() throws SQLException {
@@ -258,27 +287,26 @@ public class TraceQueryPlan implements QueryPlan {
       if (!first) {
         return null;
       }
-      Span traceSpan = conn.getTraceSpan();
-      if (traceStatement.isTraceOn()) {
-        // TRACE ON: create a new span if one doesn't exist
-        if (traceSpan == null) {
-          traceSpan = PhoenixTracing.createSpan("phoenix.trace.session");
-          Scope scope = traceSpan.makeCurrent();
-          conn.setTraceSpan(traceSpan);
-          conn.setTraceScope(scope);
-        }
-      } else {
-        // TRACE OFF: close the existing span
-        closeTrace(conn);
-      }
-      if (traceSpan == null || !traceSpan.getSpanContext().isValid()) {
-        return null;
-      }
       first = false;
-      // Return the trace ID to the client
-      // OTel trace IDs are hex strings; convert to a long for backward compatibility
-      SpanContext spanContext = traceSpan.getSpanContext();
-      long traceIdLong = parseTraceIdAsLong(spanContext.getTraceId());
+
+      // Read the current span from OTel context (e.g., set by
+      // the Java Agent). We never create or store spans — just
+      // observe what's already there.
+      Span currentSpan = Span.current();
+      SpanContext spanContext = currentSpan.getSpanContext();
+
+      long traceIdLong = 0L;
+      if (spanContext.isValid()) {
+        traceIdLong = parseTraceIdAsLong(spanContext.getTraceId());
+        if (traceStatement.isTraceOn()) {
+          LOG.info("TRACE ON (no-op): active OTel trace ID = {}", spanContext.getTraceId());
+        } else {
+          LOG.info("TRACE OFF (no-op): active OTel trace ID = {}", spanContext.getTraceId());
+        }
+      }
+
+      // Return the trace ID to the client for backward compat.
+      // Returns 0 if no active span exists.
       ImmutableBytesWritable ptr = new ImmutableBytesWritable();
       ParseNodeFactory factory = new ParseNodeFactory();
       LiteralParseNode literal = factory.literal(traceIdLong);
@@ -306,19 +334,6 @@ public class TraceQueryPlan implements QueryPlan {
       // Take the last 16 hex chars (lower 64 bits)
       String lower64 = traceId.substring(traceId.length() - 16);
       return Long.parseUnsignedLong(lower64, 16);
-    }
-
-    private void closeTrace(PhoenixConnection conn) {
-      Scope scope = conn.getTraceScope();
-      Span span = conn.getTraceSpan();
-      if (scope != null) {
-        scope.close();
-        conn.setTraceScope(null);
-      }
-      if (span != null) {
-        span.end();
-        conn.setTraceSpan(null);
-      }
     }
 
     @Override

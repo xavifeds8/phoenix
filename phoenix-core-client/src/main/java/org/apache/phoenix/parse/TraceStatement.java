@@ -19,6 +19,11 @@ package org.apache.phoenix.parse;
 
 import org.apache.phoenix.jdbc.PhoenixStatement.Operation;
 
+/**
+ * Parse node for the {@code TRACE ON} / {@code TRACE OFF} SQL commands.
+ * @deprecated Use the OpenTelemetry Java Agent for automatic tracing. TRACE ON/OFF are no-ops.
+ */
+@Deprecated
 public class TraceStatement implements BindableStatement {
 
   private final boolean traceOn;
