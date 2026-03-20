@@ -17,6 +17,7 @@
  */
 package org.apache.phoenix.hbase.index;
 
+import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Scope;
 import java.io.IOException;
@@ -27,6 +28,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import org.apache.hadoop.hbase.exceptions.TimeoutIOException;
 import org.apache.phoenix.hbase.index.util.ImmutableBytesPtr;
 import org.apache.phoenix.trace.PhoenixTracing;
+import org.apache.phoenix.trace.PhoenixTracingAttributes;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -59,7 +61,8 @@ public class LockManager {
 
     // If we're tracing start a span to show how long this took.
     if (PhoenixTracing.isRecording()) {
-      span = PhoenixTracing.createSpan("phoenix.lock.row");
+      span = PhoenixTracing.createSpan("phoenix.lock.row", Attributes
+        .of(PhoenixTracingAttributes.DB_SYSTEM, PhoenixTracingAttributes.DB_SYSTEM_VALUE));
       scope = span.makeCurrent();
       span.addEvent("Getting a row lock");
     }

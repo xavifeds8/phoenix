@@ -20,6 +20,7 @@ package org.apache.phoenix.coprocessor;
 import static org.apache.phoenix.coprocessorclient.BaseScannerRegionObserverConstants.CDC_DATA_TABLE_DEF;
 import static org.apache.phoenix.util.ScanUtil.getPageSizeMsForFilter;
 
+import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Scope;
 import java.io.IOException;
@@ -61,6 +62,7 @@ import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.query.QueryServicesOptions;
 import org.apache.phoenix.schema.StaleRegionBoundaryCacheException;
 import org.apache.phoenix.trace.PhoenixTracing;
+import org.apache.phoenix.trace.PhoenixTracingAttributes;
 import org.apache.phoenix.util.CDCUtil;
 import org.apache.phoenix.util.ClientUtil;
 import org.apache.phoenix.util.ScanUtil;
@@ -213,8 +215,9 @@ abstract public class BaseScannerRegionObserver implements RegionObserver {
       // and region servers to crash. See https://issues.apache.org/jira/browse/PHOENIX-1596
       // TraceScope can't be used here because closing the scope will end up calling
       // currentSpan.stop() and that should happen only when we are closing the scanner.
-      final Span child =
-        PhoenixTracing.createSpan(BaseScannerRegionObserverConstants.SCANNER_OPENED_TRACE_INFO);
+      final Span child = PhoenixTracing
+        .createSpan(BaseScannerRegionObserverConstants.SCANNER_OPENED_TRACE_INFO, Attributes
+          .of(PhoenixTracingAttributes.DB_SYSTEM, PhoenixTracingAttributes.DB_SYSTEM_VALUE));
       final Scope childScope = child.makeCurrent();
       try {
         RegionScanner scanner = doPostScannerOpen(c, scan, delegate);
@@ -240,6 +243,7 @@ abstract public class BaseScannerRegionObserver implements RegionObserver {
       } finally {
         try {
           if (!success && child != null) {
+            PhoenixTracing.setError(child, new IOException("Scanner failed to open successfully"));
             child.end();
           }
         } finally {

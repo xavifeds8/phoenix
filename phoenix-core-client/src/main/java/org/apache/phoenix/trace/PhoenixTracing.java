@@ -18,6 +18,7 @@
 package org.apache.phoenix.trace;
 
 import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.StatusCode;
@@ -59,6 +60,15 @@ public final class PhoenixTracing {
    */
   public static Span createSpan(String name) {
     return createSpan(name, SpanKind.INTERNAL);
+  }
+
+  /**
+   * Create a {@link SpanKind#INTERNAL} span with the given {@link Attributes}. Use this when
+   * attributes are known at span creation time.
+   */
+  public static Span createSpan(String name, Attributes attributes) {
+    return getTracer().spanBuilder(name).setAllAttributes(attributes).setSpanKind(SpanKind.INTERNAL)
+      .startSpan();
   }
 
   /**
@@ -266,13 +276,23 @@ public final class PhoenixTracing {
    * {@link org.apache.phoenix.call.CallRunner#run} to trace operations like commit and rollback.
    */
   public static CallWrapper withTracing(String spanName) {
+    return withTracing(spanName, Attributes.empty());
+  }
+
+  /**
+   * Create a {@link CallWrapper} that wraps a call with an OpenTelemetry span and the given
+   * {@link Attributes}. The span is started in {@code before()} and ended in {@code after()}. This
+   * is used with {@link org.apache.phoenix.call.CallRunner#run} to trace operations like statement
+   * execution, commit, and rollback with rich semantic attributes.
+   */
+  public static CallWrapper withTracing(String spanName, Attributes attributes) {
     return new CallWrapper() {
       private Span span;
       private Scope scope;
 
       @Override
       public void before() {
-        span = createSpan(spanName);
+        span = createSpan(spanName, attributes);
         scope = span.makeCurrent();
       }
 

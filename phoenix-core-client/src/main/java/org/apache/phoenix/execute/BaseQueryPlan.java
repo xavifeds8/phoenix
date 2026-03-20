@@ -17,6 +17,7 @@
  */
 package org.apache.phoenix.execute;
 
+import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Scope;
 import java.io.ByteArrayOutputStream;
@@ -74,6 +75,7 @@ import org.apache.phoenix.schema.PTable.IndexType;
 import org.apache.phoenix.schema.PTableType;
 import org.apache.phoenix.schema.TableRef;
 import org.apache.phoenix.trace.PhoenixTracing;
+import org.apache.phoenix.trace.PhoenixTracingAttributes;
 import org.apache.phoenix.trace.TracingIterator;
 import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.IndexUtil;
@@ -366,8 +368,31 @@ public abstract class BaseQueryPlan implements QueryPlan {
 
     // wrap the iterator so we start/end tracing as we expect
     if (PhoenixTracing.isRecording()) {
-      Span span = PhoenixTracing
-        .createSpan("phoenix.query.execute." + context.getCurrentTable().getTable().getName());
+      PTable currentTable = context.getCurrentTable().getTable();
+      String tableName = currentTable.getName().getString();
+      String schemaName =
+        currentTable.getSchemaName() != null ? currentTable.getSchemaName().getString() : "";
+      ScanRanges currentScanRanges = context.getScanRanges();
+      String scanType = currentScanRanges.isPointLookup() ? "POINT_LOOKUP"
+        : currentScanRanges.isEverything() ? "FULL"
+        : "RANGE";
+
+      boolean autoCommit = false;
+      try {
+        autoCommit = connection.getAutoCommit();
+      } catch (SQLException e) {
+        // best-effort
+      }
+
+      Attributes queryAttrs = Attributes.builder()
+        .put(PhoenixTracingAttributes.DB_SYSTEM, PhoenixTracingAttributes.DB_SYSTEM_VALUE)
+        .put(PhoenixTracingAttributes.DB_OPERATION, "SELECT")
+        .put(PhoenixTracingAttributes.DB_NAME, tableName)
+        .put(PhoenixTracingAttributes.PHOENIX_SCHEMA, schemaName)
+        .put(PhoenixTracingAttributes.PHOENIX_SCAN_TYPE, scanType)
+        .put(PhoenixTracingAttributes.PHOENIX_AUTOCOMMIT, autoCommit).build();
+
+      Span span = PhoenixTracing.createSpan("SELECT " + tableName, queryAttrs);
       Scope scope = span.makeCurrent();
       return new TracingIterator(span, scope, iterator);
     }

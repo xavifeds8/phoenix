@@ -26,6 +26,7 @@ import static org.apache.phoenix.query.QueryServices.QUERY_SERVICES_NAME;
 import static org.apache.phoenix.thirdparty.com.google.common.base.Preconditions.checkArgument;
 import static org.apache.phoenix.thirdparty.com.google.common.base.Preconditions.checkNotNull;
 
+import io.opentelemetry.api.common.Attributes;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.PrintStream;
@@ -119,6 +120,7 @@ import org.apache.phoenix.schema.types.PUnsignedTime;
 import org.apache.phoenix.schema.types.PUnsignedTimestamp;
 import org.apache.phoenix.schema.types.PVarbinary;
 import org.apache.phoenix.trace.PhoenixTracing;
+import org.apache.phoenix.trace.PhoenixTracingAttributes;
 import org.apache.phoenix.transaction.PhoenixTransactionContext;
 import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.DateUtil;
@@ -858,7 +860,9 @@ public class PhoenixConnection
         }
         return null;
       }
-    }, PhoenixTracing.withTracing("phoenix.connection.commit"));
+    }, PhoenixTracing.withTracing("phoenix.connection.commit",
+      Attributes.of(PhoenixTracingAttributes.DB_SYSTEM, PhoenixTracingAttributes.DB_SYSTEM_VALUE,
+        PhoenixTracingAttributes.PHOENIX_AUTOCOMMIT, isAutoCommit)));
     statementExecutionCounter = 0;
   }
 
@@ -1139,7 +1143,8 @@ public class PhoenixConnection
         mutationState.rollback();
         return null;
       }
-    }, PhoenixTracing.withTracing("phoenix.connection.rollback"));
+    }, PhoenixTracing.withTracing("phoenix.connection.rollback",
+      Attributes.of(PhoenixTracingAttributes.DB_SYSTEM, PhoenixTracingAttributes.DB_SYSTEM_VALUE)));
     statementExecutionCounter = 0;
   }
 

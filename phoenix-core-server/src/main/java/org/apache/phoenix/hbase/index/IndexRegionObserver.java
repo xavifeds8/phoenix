@@ -27,6 +27,7 @@ import static org.apache.phoenix.index.PhoenixIndexBuilderHelper.ATOMIC_OP_ATTRI
 import static org.apache.phoenix.index.PhoenixIndexBuilderHelper.RETURN_RESULT;
 import static org.apache.phoenix.util.ByteUtil.EMPTY_BYTE_ARRAY;
 
+import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Scope;
 import java.io.ByteArrayInputStream;
@@ -129,6 +130,7 @@ import org.apache.phoenix.schema.types.PBoolean;
 import org.apache.phoenix.schema.types.PInteger;
 import org.apache.phoenix.schema.types.PVarbinary;
 import org.apache.phoenix.trace.PhoenixTracing;
+import org.apache.phoenix.trace.PhoenixTracingAttributes;
 import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.ClientUtil;
 import org.apache.phoenix.util.EncodedColumnsUtil;
@@ -1274,7 +1276,8 @@ public class IndexRegionObserver implements RegionCoprocessor, RegionObserver {
     PhoenixIndexMetaData indexMetaData) throws Throwable {
     List<IndexMaintainer> maintainers = indexMetaData.getIndexMaintainers();
     // get the current span, or just use a null-span to avoid a bunch of if statements
-    Span current = PhoenixTracing.createSpan("phoenix.index.build.updates");
+    Span current = PhoenixTracing.createSpan("phoenix.index.build.updates",
+      Attributes.of(PhoenixTracingAttributes.DB_SYSTEM, PhoenixTracingAttributes.DB_SYSTEM_VALUE));
     try (Scope ignored = current.makeCurrent()) {
       current.addEvent("Built index updates, doing preStep");
       // The rest of this method is for handling global index updates
@@ -1310,7 +1313,10 @@ public class IndexRegionObserver implements RegionCoprocessor, RegionObserver {
           }
         }
       }
-      current.setAttribute("phoenix.index.update.count", updateCount);
+      current.setAttribute(PhoenixTracingAttributes.PHOENIX_INDEX_UPDATE_COUNT, (long) updateCount);
+    } catch (Throwable t) {
+      PhoenixTracing.setError(current, t);
+      throw t;
     } finally {
       current.end();
     }
@@ -1870,7 +1876,8 @@ public class IndexRegionObserver implements RegionCoprocessor, RegionObserver {
     }
 
     // get the current span, or just use a null-span to avoid a bunch of if statements
-    Span current = PhoenixTracing.createSpan("phoenix.index.write." + (post ? "post" : "pre"));
+    Span current = PhoenixTracing.createSpan("phoenix.index.write." + (post ? "post" : "pre"),
+      Attributes.of(PhoenixTracingAttributes.DB_SYSTEM, PhoenixTracingAttributes.DB_SYSTEM_VALUE));
     try (Scope ignored = current.makeCurrent()) {
       current
         .addEvent("Actually doing " + (post ? "post" : "pre") + " index update for first time");
@@ -1879,6 +1886,9 @@ public class IndexRegionObserver implements RegionCoprocessor, RegionObserver {
       } else {
         preWriter.write(indexUpdates, false, context.clientVersion);
       }
+    } catch (Throwable t) {
+      PhoenixTracing.setError(current, t);
+      throw t;
     } finally {
       current.end();
     }

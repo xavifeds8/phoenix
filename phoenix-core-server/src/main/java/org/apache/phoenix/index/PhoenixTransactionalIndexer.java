@@ -17,6 +17,7 @@
  */
 package org.apache.phoenix.index;
 
+import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Scope;
 import java.io.IOException;
@@ -43,6 +44,7 @@ import org.apache.phoenix.hbase.index.write.IndexWriter;
 import org.apache.phoenix.hbase.index.write.LeaveIndexActiveFailurePolicy;
 import org.apache.phoenix.hbase.index.write.ParallelWriterIndexCommitter;
 import org.apache.phoenix.trace.PhoenixTracing;
+import org.apache.phoenix.trace.PhoenixTracingAttributes;
 import org.apache.phoenix.transaction.PhoenixTransactionContext;
 import org.apache.phoenix.util.ClientUtil;
 import org.apache.phoenix.util.ServerUtil.ConnectionType;
@@ -155,7 +157,8 @@ public class PhoenixTransactionalIndexer implements RegionObserver, RegionCoproc
 
     Collection<Pair<Mutation, byte[]>> indexUpdates = null;
     // get the current span, or just use a null-span to avoid a bunch of if statements
-    Span current = PhoenixTracing.createSpan("phoenix.index.build.updates");
+    Span current = PhoenixTracing.createSpan("phoenix.index.build.updates",
+      Attributes.of(PhoenixTracingAttributes.DB_SYSTEM, PhoenixTracingAttributes.DB_SYSTEM_VALUE));
     try (Scope ignored = current.makeCurrent()) {
 
       RegionCoprocessorEnvironment env = c.getEnvironment();
@@ -192,7 +195,8 @@ public class PhoenixTransactionalIndexer implements RegionObserver, RegionCoproc
       }
 
       current.addEvent("Built index updates, doing preStep");
-      current.setAttribute("phoenix.index.update.count", (long) context.indexUpdates.size());
+      current.setAttribute(PhoenixTracingAttributes.PHOENIX_INDEX_UPDATE_COUNT,
+        (long) context.indexUpdates.size());
     } catch (Throwable t) {
       PhoenixTracing.setError(current, t);
       String msg = "Failed to update index with entries:" + indexUpdates;
@@ -211,7 +215,8 @@ public class PhoenixTransactionalIndexer implements RegionObserver, RegionCoproc
       return;
     }
     // get the current span, or just use a null-span to avoid a bunch of if statements
-    Span current = PhoenixTracing.createSpan("phoenix.index.write.updates");
+    Span current = PhoenixTracing.createSpan("phoenix.index.write.updates",
+      Attributes.of(PhoenixTracingAttributes.DB_SYSTEM, PhoenixTracingAttributes.DB_SYSTEM_VALUE));
     try (Scope ignored = current.makeCurrent()) {
 
       if (success) { // if miniBatchOp was successfully written, write index updates

@@ -19,6 +19,7 @@ package org.apache.phoenix.hbase.index;
 
 import static org.apache.phoenix.hbase.index.util.IndexManagementUtil.rethrowIndexingException;
 
+import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Scope;
 import java.io.IOException;
@@ -73,6 +74,7 @@ import org.apache.phoenix.hbase.index.write.recovery.PerRegionIndexWriteCache;
 import org.apache.phoenix.hbase.index.write.recovery.StoreFailuresInCachePolicy;
 import org.apache.phoenix.query.QueryServicesOptions;
 import org.apache.phoenix.trace.PhoenixTracing;
+import org.apache.phoenix.trace.PhoenixTracingAttributes;
 import org.apache.phoenix.util.ClientUtil;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.ScanUtil;
@@ -487,7 +489,8 @@ public class Indexer implements RegionObserver, RegionCoprocessor {
 
     // get the current span, or just use a null-span to avoid a bunch of if statements
     Collection<Pair<Mutation, byte[]>> indexUpdates = null;
-    Span current = PhoenixTracing.createSpan("phoenix.index.build.updates");
+    Span current = PhoenixTracing.createSpan("phoenix.index.build.updates",
+      Attributes.of(PhoenixTracingAttributes.DB_SYSTEM, PhoenixTracingAttributes.DB_SYSTEM_VALUE));
     try (Scope ignored = current.makeCurrent()) {
       long start = EnvironmentEdgeManager.currentTimeMillis();
 
@@ -504,7 +507,11 @@ public class Indexer implements RegionObserver, RegionCoprocessor {
       }
       metricSource.updateIndexPrepareTime(dataTableName, duration);
       current.addEvent("Built index updates, doing preStep");
-      current.setAttribute("phoenix.index.update.count", (long) indexUpdates.size());
+      current.setAttribute(PhoenixTracingAttributes.PHOENIX_INDEX_UPDATE_COUNT,
+        (long) indexUpdates.size());
+    } catch (Throwable t) {
+      PhoenixTracing.setError(current, t);
+      throw t;
     } finally {
       current.end();
     }
@@ -606,7 +613,8 @@ public class Indexer implements RegionObserver, RegionCoprocessor {
     }
 
     // get the current span, or just use a null-span to avoid a bunch of if statements
-    Span current = PhoenixTracing.createSpan("phoenix.index.write.complete");
+    Span current = PhoenixTracing.createSpan("phoenix.index.write.complete",
+      Attributes.of(PhoenixTracingAttributes.DB_SYSTEM, PhoenixTracingAttributes.DB_SYSTEM_VALUE));
     try (Scope ignored = current.makeCurrent()) {
       long start = EnvironmentEdgeManager.currentTimeMillis();
 
@@ -621,6 +629,9 @@ public class Indexer implements RegionObserver, RegionCoprocessor {
         metricSource.incrementNumSlowIndexWriteCalls(dataTableName);
       }
       metricSource.updateIndexWriteTime(dataTableName, duration);
+    } catch (Throwable t) {
+      PhoenixTracing.setError(current, t);
+      throw t;
     } finally {
       current.end();
     }

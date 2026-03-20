@@ -34,6 +34,7 @@ public class TracingIterator extends DelegateResultIterator {
   private final Span span;
   private final Scope scope;
   private boolean started;
+  private boolean errored;
 
   /**
    * @param span     the OpenTelemetry span to manage
@@ -49,7 +50,9 @@ public class TracingIterator extends DelegateResultIterator {
   @Override
   public void close() throws SQLException {
     try {
-      span.setStatus(StatusCode.OK);
+      if (!errored) {
+        span.setStatus(StatusCode.OK);
+      }
     } finally {
       try {
         scope.close();
@@ -62,11 +65,19 @@ public class TracingIterator extends DelegateResultIterator {
 
   @Override
   public Tuple next() throws SQLException {
-    if (!started) {
-      span.addEvent("First request completed");
-      started = true;
+    try {
+      if (!started) {
+        span.addEvent("First request completed");
+        started = true;
+      }
+      return super.next();
+    } catch (Throwable t) {
+      if (!errored) {
+        errored = true;
+        PhoenixTracing.setError(span, t);
+      }
+      throw t;
     }
-    return super.next();
   }
 
   @Override
