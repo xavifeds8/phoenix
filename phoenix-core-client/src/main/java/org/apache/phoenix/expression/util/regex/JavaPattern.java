@@ -52,6 +52,15 @@ public class JavaPattern extends AbstractBasePattern {
   }
 
   @Override
+  public boolean search(ImmutableBytesWritable srcPtr) {
+    Preconditions.checkNotNull(srcPtr);
+    String sourceStr = (String) PVarchar.INSTANCE.toObject(srcPtr);
+    // Handle empty string - convert null to empty string for matching
+    if (sourceStr == null) sourceStr = "";
+    return pattern.matcher(sourceStr).find();
+  }
+
+  @Override
   public String pattern() {
     return pattern.pattern();
   }

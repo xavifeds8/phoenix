@@ -23,6 +23,8 @@ public abstract class AbstractBasePattern {
 
   public abstract void matches(ImmutableBytesWritable srcPtr);
 
+  public abstract boolean search(ImmutableBytesWritable srcPtr);
+
   public abstract void replaceAll(ImmutableBytesWritable srcPtr, byte[] rStrBytes, int rStrOffset,
     int rStrLen);
 

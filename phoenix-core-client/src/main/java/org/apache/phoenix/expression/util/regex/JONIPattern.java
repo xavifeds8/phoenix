@@ -73,6 +73,21 @@ public class JONIPattern extends AbstractBasePattern implements AbstractBaseSpli
   }
 
   @Override
+  public boolean search(ImmutableBytesWritable srcPtr) {
+    Preconditions.checkNotNull(srcPtr);
+    // Handle empty string case - pattern .* should match empty string
+    if (srcPtr.getLength() == 0) {
+      // Empty string matches patterns like .* or ^$ but not .+
+      int range = srcPtr.getOffset();
+      Matcher matcher = pattern.matcher(srcPtr.get(), 0, range);
+      return matcher.search(srcPtr.getOffset(), range, Option.DEFAULT) >= 0;
+    }
+    int range = srcPtr.getOffset() + srcPtr.getLength();
+    Matcher matcher = pattern.matcher(srcPtr.get(), 0, range);
+    return matcher.search(srcPtr.getOffset(), range, Option.DEFAULT) >= 0;
+  }
+
+  @Override
   public String pattern() {
     return patternString;
   }
