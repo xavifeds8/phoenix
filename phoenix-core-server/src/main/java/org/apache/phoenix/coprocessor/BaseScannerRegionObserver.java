@@ -20,6 +20,9 @@ package org.apache.phoenix.coprocessor;
 import static org.apache.phoenix.coprocessorclient.BaseScannerRegionObserverConstants.CDC_DATA_TABLE_DEF;
 import static org.apache.phoenix.util.ScanUtil.getPageSizeMsForFilter;
 
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Scope;
 import java.io.IOException;
 import java.util.List;
 import org.apache.hadoop.conf.Configuration;
@@ -48,8 +51,6 @@ import org.apache.hadoop.hbase.regionserver.compactions.CompactionLifeCycleTrack
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionRequest;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
-import org.apache.htrace.Span;
-import org.apache.htrace.Trace;
 import org.apache.phoenix.coprocessorclient.BaseScannerRegionObserverConstants;
 import org.apache.phoenix.execute.TupleProjector;
 import org.apache.phoenix.filter.PagingFilter;
@@ -60,6 +61,8 @@ import org.apache.phoenix.iterate.RegionScannerFactory;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.query.QueryServicesOptions;
 import org.apache.phoenix.schema.StaleRegionBoundaryCacheException;
+import org.apache.phoenix.trace.PhoenixTracing;
+import org.apache.phoenix.trace.PhoenixTracingAttributes;
 import org.apache.phoenix.util.CDCUtil;
 import org.apache.phoenix.util.ClientUtil;
 import org.apache.phoenix.util.ScanUtil;
@@ -212,10 +215,10 @@ abstract public class BaseScannerRegionObserver implements RegionObserver {
       // and region servers to crash. See https://issues.apache.org/jira/browse/PHOENIX-1596
       // TraceScope can't be used here because closing the scope will end up calling
       // currentSpan.stop() and that should happen only when we are closing the scanner.
-      final Span savedSpan = Trace.currentSpan();
-      final Span child =
-        Trace.startSpan(BaseScannerRegionObserverConstants.SCANNER_OPENED_TRACE_INFO, savedSpan)
-          .getSpan();
+      final Span child = PhoenixTracing
+        .createSpan(BaseScannerRegionObserverConstants.SCANNER_OPENED_TRACE_INFO, Attributes
+          .of(PhoenixTracingAttributes.DB_SYSTEM, PhoenixTracingAttributes.DB_SYSTEM_VALUE));
+      final Scope childScope = child.makeCurrent();
       try {
         RegionScanner scanner = doPostScannerOpen(c, scan, delegate);
         scanner = new DelegateRegionScanner(scanner) {
@@ -227,7 +230,7 @@ abstract public class BaseScannerRegionObserver implements RegionObserver {
               delegate.close();
             } finally {
               if (child != null) {
-                child.stop();
+                child.end();
               }
             }
           }
@@ -240,10 +243,11 @@ abstract public class BaseScannerRegionObserver implements RegionObserver {
       } finally {
         try {
           if (!success && child != null) {
-            child.stop();
+            PhoenixTracing.setError(child, new IOException("Scanner failed to open successfully"));
+            child.end();
           }
         } finally {
-          Trace.continueSpan(savedSpan);
+          childScope.close();
         }
       }
     }

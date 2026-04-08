@@ -17,15 +17,18 @@
  */
 package org.apache.phoenix.hbase.index;
 
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Scope;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.hadoop.hbase.exceptions.TimeoutIOException;
-import org.apache.htrace.Trace;
-import org.apache.htrace.TraceScope;
 import org.apache.phoenix.hbase.index.util.ImmutableBytesPtr;
+import org.apache.phoenix.trace.PhoenixTracing;
+import org.apache.phoenix.trace.PhoenixTracingAttributes;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,12 +56,15 @@ public class LockManager {
    */
   public RowLock lockRow(ImmutableBytesPtr rowKey, long waitDurationMs) throws IOException {
     RowLockImpl rowLock = new RowLockImpl(rowKey);
-    TraceScope traceScope = null;
+    Span span = null;
+    Scope scope = null;
 
     // If we're tracing start a span to show how long this took.
-    if (Trace.isTracing()) {
-      traceScope = Trace.startSpan("LockManager.lockRow");
-      traceScope.getSpan().addTimelineAnnotation("Getting a row lock");
+    if (PhoenixTracing.isRecording()) {
+      span = PhoenixTracing.createSpan("phoenix.lock.row", Attributes
+        .of(PhoenixTracingAttributes.DB_SYSTEM, PhoenixTracingAttributes.DB_SYSTEM_VALUE));
+      scope = span.makeCurrent();
+      span.addEvent("Getting a row lock");
     }
     boolean success = false;
     try {
@@ -93,11 +99,12 @@ public class LockManager {
       Thread.currentThread().interrupt();
       throw iie;
     } finally {
-      if (traceScope != null) {
+      if (span != null) {
         if (!success) {
-          traceScope.getSpan().addTimelineAnnotation("Failed to get row lock");
+          span.addEvent("Failed to get row lock");
         }
-        traceScope.close();
+        if (scope != null) scope.close();
+        span.end();
       }
     }
   }

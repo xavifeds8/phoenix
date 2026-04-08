@@ -45,6 +45,9 @@ import static org.apache.phoenix.monitoring.MetricType.UPSERT_SQL_QUERY_TIME;
 import static org.apache.phoenix.monitoring.MetricType.UPSERT_SUCCESS_SQL_COUNTER;
 import static org.apache.phoenix.query.QueryServices.CONNECTION_EXPLAIN_PLAN_LOGGING_ENABLED;
 
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.common.AttributesBuilder;
+import io.opentelemetry.api.trace.Span;
 import java.io.File;
 import java.io.IOException;
 import java.io.Reader;
@@ -224,7 +227,8 @@ import org.apache.phoenix.schema.tuple.Tuple;
 import org.apache.phoenix.schema.types.PDataType;
 import org.apache.phoenix.schema.types.PLong;
 import org.apache.phoenix.schema.types.PVarchar;
-import org.apache.phoenix.trace.util.Tracing;
+import org.apache.phoenix.trace.PhoenixTracing;
+import org.apache.phoenix.trace.PhoenixTracingAttributes;
 import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.CDCUtil;
 import org.apache.phoenix.util.ClientUtil;
@@ -612,6 +616,9 @@ public class PhoenixStatement implements PhoenixMonitoredStatement, SQLCloseable
         .run(new CallRunner.CallableThrowable<Pair<Integer, ResultSet>, SQLException>() {
           @Override
           public Pair<Integer, ResultSet> call() throws SQLException {
+            // Set db.statement on the current tracing span (best-effort, no-op if not recording)
+            Span.current().setAttribute(PhoenixTracingAttributes.DB_STATEMENT,
+              buildSqlForTracing(stmt));
             boolean success = false;
             String tableName = null;
             boolean isUpsert = false;
@@ -781,8 +788,11 @@ public class PhoenixStatement implements PhoenixMonitoredStatement, SQLCloseable
 
             }
           }
-        }, PhoenixContextExecutor.inContext(), Tracing.withTracing(connection, this.toString()));
+        }, PhoenixContextExecutor.inContext(), PhoenixTracing
+          .withTracing(buildMutationSpanName(stmt), buildMutationSpanAttributes(stmt)));
     } catch (Exception e) {
+      // Record the error on the current tracing span (best-effort, no-op if not recording)
+      PhoenixTracing.setError(Span.current(), e);
       if (queryLogger.isAuditLoggingEnabled()) {
         queryLogger.log(QueryLogInfo.TABLE_NAME_I, getTargetForAudit(stmt));
         queryLogger.log(QueryLogInfo.EXCEPTION_TRACE_I, Throwables.getStackTraceAsString(e));
@@ -1911,6 +1921,10 @@ public class PhoenixStatement implements PhoenixMonitoredStatement, SQLCloseable
     }
   }
 
+  /**
+   * @deprecated TRACE ON/OFF are deprecated no-ops. Use the OpenTelemetry Java Agent instead.
+   */
+  @Deprecated
   private static class ExecutableTraceStatement extends TraceStatement
     implements CompilableStatement {
 
@@ -3085,6 +3099,85 @@ public class PhoenixStatement implements PhoenixMonitoredStatement, SQLCloseable
     String sb = Stream.of(explainPlanAttributes.getExplainScanType(), regionInfo)
       .collect(Collectors.joining(","));
     updateActivityOnConnection(ActivityLogInfo.EXPLAIN_PLAN, sb);
+  }
+
+  /**
+   * Build an OTel-convention span name for a mutation statement. Format: "{OPERATION} {TABLE}" e.g.
+   * "UPSERT TRACE_TEST", "DELETE MY_TABLE". Falls back to "phoenix.statement.execute" for non-DML
+   * mutations (DDL, etc.).
+   */
+  private String buildMutationSpanName(CompilableStatement stmt) {
+    String operation = null;
+    String table = null;
+    try {
+      if (stmt instanceof ExecutableUpsertStatement) {
+        operation = "UPSERT";
+        table = ((ExecutableUpsertStatement) stmt).getTable().getName().getTableName();
+      } else if (stmt instanceof ExecutableDeleteStatement) {
+        operation = "DELETE";
+        table = ((ExecutableDeleteStatement) stmt).getTable().getName().getTableName();
+      }
+    } catch (Exception e) {
+      // best-effort: fall through to default
+    }
+    if (operation != null && table != null) {
+      return operation + " " + table;
+    }
+    return "phoenix.statement.execute";
+  }
+
+  /**
+   * Build a best-effort SQL representation for the {@code db.statement} tracing attribute. Since
+   * the original SQL text is not threaded through to {@code executeMutation}, we reconstruct a
+   * summary from the parsed statement. For UPSERT/DELETE this produces e.g.
+   * {@code "UPSERT INTO TRACE_TEST ..."} or {@code "DELETE FROM MY_TABLE ..."}.
+   */
+  private static String buildSqlForTracing(CompilableStatement stmt) {
+    try {
+      if (stmt instanceof ExecutableUpsertStatement) {
+        return "UPSERT INTO " + ((ExecutableUpsertStatement) stmt).getTable().getName().toString();
+      } else if (stmt instanceof ExecutableDeleteStatement) {
+        return "DELETE FROM " + ((ExecutableDeleteStatement) stmt).getTable().getName().toString();
+      }
+    } catch (Exception e) {
+      // best-effort
+    }
+    return stmt.getOperation().name();
+  }
+
+  /**
+   * Build OTel semantic attributes for a mutation statement span. Extracts table name, schema,
+   * operation type, and autocommit status from the parsed statement and connection.
+   */
+  private Attributes buildMutationSpanAttributes(CompilableStatement stmt) {
+    AttributesBuilder builder = Attributes.builder();
+    builder.put(PhoenixTracingAttributes.DB_SYSTEM, PhoenixTracingAttributes.DB_SYSTEM_VALUE);
+    try {
+      builder.put(PhoenixTracingAttributes.PHOENIX_AUTOCOMMIT, connection.getAutoCommit());
+    } catch (SQLException e) {
+      // ignore -- autocommit is best-effort
+    }
+    try {
+      if (stmt instanceof ExecutableUpsertStatement) {
+        TableName tn = ((ExecutableUpsertStatement) stmt).getTable().getName();
+        builder.put(PhoenixTracingAttributes.DB_OPERATION, "UPSERT");
+        builder.put(PhoenixTracingAttributes.DB_NAME, tn.getTableName());
+        builder.put(PhoenixTracingAttributes.PHOENIX_SCHEMA,
+          tn.getSchemaName() != null ? tn.getSchemaName() : "");
+      } else if (stmt instanceof ExecutableDeleteStatement) {
+        TableName tn = ((ExecutableDeleteStatement) stmt).getTable().getName();
+        builder.put(PhoenixTracingAttributes.DB_OPERATION, "DELETE");
+        builder.put(PhoenixTracingAttributes.DB_NAME, tn.getTableName());
+        builder.put(PhoenixTracingAttributes.PHOENIX_SCHEMA,
+          tn.getSchemaName() != null ? tn.getSchemaName() : "");
+      } else {
+        // DDL or other mutation — use the operation enum name
+        builder.put(PhoenixTracingAttributes.DB_OPERATION, stmt.getOperation().name());
+      }
+    } catch (Exception e) {
+      // best-effort: don't fail the mutation because of tracing
+    }
+    return builder.build();
   }
 
   private String getRegionInfo(List<HRegionLocation> location) {

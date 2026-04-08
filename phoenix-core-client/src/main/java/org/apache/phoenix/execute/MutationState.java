@@ -41,6 +41,10 @@ import static org.apache.phoenix.query.QueryServicesOptions.DEFAULT_SERVER_SIDE_
 import static org.apache.phoenix.query.QueryServicesOptions.DEFAULT_WILDCARD_QUERY_DYNAMIC_COLS_ATTRIB;
 import static org.apache.phoenix.thirdparty.com.google.common.base.Preconditions.checkNotNull;
 
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.StatusCode;
+import io.opentelemetry.context.Scope;
 import java.io.IOException;
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -68,8 +72,6 @@ import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
-import org.apache.htrace.Span;
-import org.apache.htrace.TraceScope;
 import org.apache.phoenix.cache.ServerCacheClient.ServerCache;
 import org.apache.phoenix.compile.MutationPlan;
 import org.apache.phoenix.coprocessorclient.BaseScannerRegionObserverConstants;
@@ -118,7 +120,8 @@ import org.apache.phoenix.schema.ValueSchema.Field;
 import org.apache.phoenix.schema.types.PInteger;
 import org.apache.phoenix.schema.types.PLong;
 import org.apache.phoenix.schema.types.PTimestamp;
-import org.apache.phoenix.trace.util.Tracing;
+import org.apache.phoenix.trace.PhoenixTracing;
+import org.apache.phoenix.trace.PhoenixTracingAttributes;
 import org.apache.phoenix.transaction.PhoenixTransactionContext;
 import org.apache.phoenix.transaction.PhoenixTransactionContext.PhoenixVisibilityLevel;
 import org.apache.phoenix.transaction.TransactionFactory;
@@ -1407,8 +1410,10 @@ public class MutationState implements SQLCloseable {
     Map<TableInfo, List<Mutation>> physicalTableMutationMap = Maps.newLinkedHashMap();
 
     // add tracing for this operation
-    try (TraceScope trace = Tracing.startNewSpan(connection, "Committing mutations to tables")) {
-      Span span = trace.getSpan();
+    Span span = PhoenixTracing.createSpan("phoenix.mutation.commit",
+      Attributes.of(PhoenixTracingAttributes.DB_SYSTEM, PhoenixTracingAttributes.DB_SYSTEM_VALUE,
+        PhoenixTracingAttributes.PHOENIX_MUTATION_TABLES, (long) commitBatch.size()));
+    try (Scope ignored = span.makeCurrent()) {
       ImmutableBytesWritable indexMetaDataPtr = new ImmutableBytesWritable();
       for (Map.Entry<TableRef, MultiRowMutationState> entry : commitBatch.entrySet()) {
         // at this point we are going through mutations for each table
@@ -1484,6 +1489,15 @@ public class MutationState implements SQLCloseable {
           "Ignoring exception that happened during setting index verified value to verified=TRUE ",
           ex);
       }
+      span.setStatus(StatusCode.OK);
+    } catch (Throwable t) {
+      PhoenixTracing.setError(span, t);
+      if (t instanceof SQLException) {
+        throw (SQLException) t;
+      }
+      throw new SQLException(t);
+    } finally {
+      span.end();
     }
   }
 
@@ -1500,10 +1514,13 @@ public class MutationState implements SQLCloseable {
         getMutationBatchList(batchSize, batchSizeBytes, mutationList);
       int totalBatchCount = mutationBatchList.size();
 
-      // create a span per target table
-      // TODO maybe we can be smarter about the table name to string here?
-      Span child =
-        Tracing.child(span, "Writing mutation batch for table: " + Bytes.toString(htableName));
+      // create a span per target table with OTel semantic attributes
+      Span child = PhoenixTracing.createSpan(
+        "phoenix.mutation.batch.write." + Bytes.toString(htableName),
+        Attributes.builder()
+          .put(PhoenixTracingAttributes.DB_SYSTEM, PhoenixTracingAttributes.DB_SYSTEM_VALUE)
+          .put(PhoenixTracingAttributes.DB_NAME, htableNameStr)
+          .put(PhoenixTracingAttributes.PHOENIX_MUTATION_ROWS, (long) mutationList.size()).build());
 
       int retryCount = 0;
       boolean shouldRetry = false;
@@ -1559,8 +1576,10 @@ public class MutationState implements SQLCloseable {
           numMutations = mutationList.size();
           GLOBAL_MUTATION_BATCH_SIZE.update(numMutations);
           totalMutationBytesObject = calculateMutationSize(mutationList, true);
+          child.setAttribute(PhoenixTracingAttributes.PHOENIX_MUTATION_BYTES,
+            totalMutationBytesObject.getTotalMutationBytes());
 
-          child.addTimelineAnnotation("Attempt " + retryCount);
+          child.addEvent("Attempt " + retryCount + ", mutations=" + numMutations);
           Iterator<List<Mutation>> itrListMutation = mutationBatchList.iterator();
           while (itrListMutation.hasNext()) {
             final List<Mutation> mutationBatch = itrListMutation.next();
@@ -1647,7 +1666,8 @@ public class MutationState implements SQLCloseable {
             if (LOGGER.isDebugEnabled()) LOGGER.debug(
               "Sent batch of " + mutationBatch.size() + " for " + Bytes.toString(htableName));
           }
-          child.stop();
+          child.setStatus(StatusCode.OK);
+          child.end();
           shouldRetry = false;
           numFailedMutations = 0;
 
@@ -1682,9 +1702,12 @@ public class MutationState implements SQLCloseable {
               connection.getQueryServices().clearTableRegionCache(TableName.valueOf(htableName));
 
               // add a new child span as this one failed
-              child.addTimelineAnnotation(msg);
-              child.stop();
-              child = Tracing.child(span, "Failed batch, attempting retry");
+              child.addEvent(msg);
+              child.end();
+              child = PhoenixTracing.createSpan("phoenix.mutation.batch.retry",
+                Attributes.of(PhoenixTracingAttributes.DB_SYSTEM,
+                  PhoenixTracingAttributes.DB_SYSTEM_VALUE, PhoenixTracingAttributes.DB_NAME,
+                  htableNameStr));
 
               continue;
             } else

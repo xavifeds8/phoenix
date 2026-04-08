@@ -17,6 +17,9 @@
  */
 package org.apache.phoenix.execute;
 
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Scope;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -33,7 +36,6 @@ import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.io.TimeRange;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.io.WritableUtils;
-import org.apache.htrace.TraceScope;
 import org.apache.phoenix.cache.ServerCacheClient.ServerCache;
 import org.apache.phoenix.compile.ExplainPlan;
 import org.apache.phoenix.compile.ExplainPlanAttributes;
@@ -72,8 +74,9 @@ import org.apache.phoenix.schema.PTable.ImmutableStorageScheme;
 import org.apache.phoenix.schema.PTable.IndexType;
 import org.apache.phoenix.schema.PTableType;
 import org.apache.phoenix.schema.TableRef;
+import org.apache.phoenix.trace.PhoenixTracing;
+import org.apache.phoenix.trace.PhoenixTracingAttributes;
 import org.apache.phoenix.trace.TracingIterator;
-import org.apache.phoenix.trace.util.Tracing;
 import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.IndexUtil;
 import org.apache.phoenix.util.LogUtil;
@@ -364,10 +367,34 @@ public abstract class BaseQueryPlan implements QueryPlan {
     }
 
     // wrap the iterator so we start/end tracing as we expect
-    if (Tracing.isTracing()) {
-      TraceScope scope = Tracing.startNewSpan(context.getConnection(),
-        "Creating basic query for " + getPlanSteps(iterator));
-      if (scope.getSpan() != null) return new TracingIterator(scope, iterator);
+    if (PhoenixTracing.isRecording()) {
+      PTable currentTable = context.getCurrentTable().getTable();
+      String tableName = currentTable.getName().getString();
+      String schemaName =
+        currentTable.getSchemaName() != null ? currentTable.getSchemaName().getString() : "";
+      ScanRanges currentScanRanges = context.getScanRanges();
+      String scanType = currentScanRanges.isPointLookup() ? "POINT_LOOKUP"
+        : currentScanRanges.isEverything() ? "FULL"
+        : "RANGE";
+
+      boolean autoCommit = false;
+      try {
+        autoCommit = connection.getAutoCommit();
+      } catch (SQLException e) {
+        // best-effort
+      }
+
+      Attributes queryAttrs = Attributes.builder()
+        .put(PhoenixTracingAttributes.DB_SYSTEM, PhoenixTracingAttributes.DB_SYSTEM_VALUE)
+        .put(PhoenixTracingAttributes.DB_OPERATION, "SELECT")
+        .put(PhoenixTracingAttributes.DB_NAME, tableName)
+        .put(PhoenixTracingAttributes.PHOENIX_SCHEMA, schemaName)
+        .put(PhoenixTracingAttributes.PHOENIX_SCAN_TYPE, scanType)
+        .put(PhoenixTracingAttributes.PHOENIX_AUTOCOMMIT, autoCommit).build();
+
+      Span span = PhoenixTracing.createSpan("SELECT " + tableName, queryAttrs);
+      Scope scope = span.makeCurrent();
+      return new TracingIterator(span, scope, iterator);
     }
     return iterator;
   }
