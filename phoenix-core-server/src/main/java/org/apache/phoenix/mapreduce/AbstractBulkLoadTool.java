@@ -36,6 +36,7 @@ import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.RegionLocator;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.tool.BulkLoadHFiles;
+import org.apache.hadoop.mapreduce.Counters;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
@@ -97,6 +98,12 @@ public abstract class AbstractBulkLoadTool extends Configured implements Tool {
     new Option("k", "skip-header", false, "Skip the first line of CSV files (the header)");
   static final Option ENABLE_CORRUPT_INDEXES = new Option("corruptindexes", "corruptindexes", false,
     "Allow bulk loading into non-empty tables with global secondary indexes");
+  static final Option BAD_RECORDS_PATH_OPT = new Option("B", "bad-records-path", true,
+    "HDFS path to write rejected/bad records (implies --ignore-errors)");
+  static final Option MAX_ERRORS_OPT = new Option("m", "max-errors", true,
+    "Maximum number of errors allowed before failing the job (implies --ignore-errors)");
+  static final Option ERROR_THRESHOLD_PCT_OPT = new Option("p", "error-threshold-pct", true,
+    "Maximum error percentage (0-100) before failing the job (implies --ignore-errors)");
 
   /**
    * Set configuration values based on parsed command line options.
@@ -122,6 +129,9 @@ public abstract class AbstractBulkLoadTool extends Configured implements Tool {
     options.addOption(HELP_OPT);
     options.addOption(SKIP_HEADER_OPT);
     options.addOption(ENABLE_CORRUPT_INDEXES);
+    options.addOption(BAD_RECORDS_PATH_OPT);
+    options.addOption(MAX_ERRORS_OPT);
+    options.addOption(ERROR_THRESHOLD_PCT_OPT);
     return options;
   }
 
@@ -238,6 +248,33 @@ public abstract class AbstractBulkLoadTool extends Configured implements Tool {
       Preconditions.checkArgument(!importColumns.isEmpty(), "Column info list is empty");
       FormatToBytesWritableMapper.configureColumnInfoList(conf, importColumns);
       boolean ignoreInvalidRows = cmdLine.hasOption(IGNORE_ERRORS_OPT.getOpt());
+
+      // --bad-records-path, --max-errors, --error-threshold-pct all imply --ignore-errors
+      if (cmdLine.hasOption(BAD_RECORDS_PATH_OPT.getOpt())) {
+        conf.set(FormatToBytesWritableMapper.BAD_RECORDS_PATH_CONFKEY,
+          cmdLine.getOptionValue(BAD_RECORDS_PATH_OPT.getOpt()));
+        ignoreInvalidRows = true;
+      }
+      if (cmdLine.hasOption(MAX_ERRORS_OPT.getOpt())) {
+        long maxErrors = Long.parseLong(cmdLine.getOptionValue(MAX_ERRORS_OPT.getOpt()));
+        if (maxErrors < 0) {
+          throw new IllegalArgumentException("--max-errors must be a non-negative number");
+        }
+        conf.setLong(FormatToBytesWritableMapper.MAX_ERRORS_CONFKEY, maxErrors);
+        ignoreInvalidRows = true;
+      }
+      if (cmdLine.hasOption(ERROR_THRESHOLD_PCT_OPT.getOpt())) {
+        double pct =
+          Double.parseDouble(cmdLine.getOptionValue(ERROR_THRESHOLD_PCT_OPT.getOpt()));
+        if (pct < 0 || pct > 100) {
+          throw new IllegalArgumentException(
+            "--error-threshold-pct must be between 0 and 100");
+        }
+        conf.set(FormatToBytesWritableMapper.ERROR_THRESHOLD_PCT_CONFKEY,
+          String.valueOf(pct));
+        ignoreInvalidRows = true;
+      }
+
       conf.setBoolean(FormatToBytesWritableMapper.IGNORE_INVALID_ROW_CONFKEY, ignoreInvalidRows);
       String tbn = SchemaUtil.getEscapedFullTableName(qualifiedTableName);
       conf.set(FormatToBytesWritableMapper.TABLE_NAME_CONFKEY, tbn);
@@ -361,6 +398,19 @@ public abstract class AbstractBulkLoadTool extends Configured implements Tool {
       LOGGER.info("Running MapReduce import job from {} to {}", inputPaths, outputPath);
       boolean success = job.waitForCompletion(true);
 
+      // Print job summary report
+      printJobSummary(job, conf);
+
+      // Post-job threshold check (data quality gate before loading HFiles)
+      if (success && !checkPostJobThreshold(job, conf)) {
+        LOGGER.error("Bulk load aborted: error threshold exceeded. "
+          + "HFiles will NOT be loaded into the target table.");
+        if (!outputPath.getFileSystem(conf).delete(outputPath, true)) {
+          LOGGER.error("Failed to delete the output directory {}", outputPath);
+        }
+        return -1;
+      }
+
       if (success) {
         if (hasLocalIndexes) {
           try {
@@ -387,6 +437,88 @@ public abstract class AbstractBulkLoadTool extends Configured implements Tool {
         return -1;
       }
     }
+  }
+
+  /**
+   * Print a summary of the bulk load job results using MapReduce counters.
+   */
+  private void printJobSummary(Job job, Configuration conf) {
+    try {
+      Counters counters = job.getCounters();
+      if (counters == null) {
+        LOGGER.warn("Unable to retrieve job counters");
+        return;
+      }
+      String group = FormatToBytesWritableMapper.COUNTER_GROUP_NAME;
+      long upsertsDone = counters.findCounter(group, "Upserts Done").getValue();
+      long parserErrors = counters.findCounter(group, "Parser errors").getValue();
+      long recordErrors = counters.findCounter(group, "Errors on records").getValue();
+      long emptyRecords = counters.findCounter(group, "Empty records").getValue();
+      long totalErrors = parserErrors + recordErrors;
+      long totalProcessed = upsertsDone + totalErrors + emptyRecords;
+
+      LOGGER.info("=== Bulk Load Job Summary ===");
+      LOGGER.info("  Total records processed: {}", totalProcessed);
+      LOGGER.info("  Successful upserts:      {}", upsertsDone);
+      LOGGER.info("  Parser errors:           {}", parserErrors);
+      LOGGER.info("  Record errors:           {}", recordErrors);
+      LOGGER.info("  Empty records:           {}", emptyRecords);
+      if (totalProcessed > 0) {
+        LOGGER.info("  Error rate:              {}%",
+          String.format("%.2f", (totalErrors * 100.0) / totalProcessed));
+      }
+      String badRecordsPath = conf.get(FormatToBytesWritableMapper.BAD_RECORDS_PATH_CONFKEY);
+      if (badRecordsPath != null) {
+        LOGGER.info("  Bad records written to:  {}", badRecordsPath);
+      }
+      LOGGER.info("  Job status:              {}", job.isSuccessful() ? "SUCCESS" : "FAILED");
+      LOGGER.info("=============================");
+    } catch (Exception e) {
+      LOGGER.warn("Failed to print job summary", e);
+    }
+  }
+
+  /**
+   * Check post-job error thresholds using aggregated MapReduce counters.
+   * Returns true if thresholds are satisfied (or not configured), false if violated.
+   */
+  private boolean checkPostJobThreshold(Job job, Configuration conf) {
+    try {
+      Counters counters = job.getCounters();
+      if (counters == null) {
+        return true;
+      }
+      String group = FormatToBytesWritableMapper.COUNTER_GROUP_NAME;
+      long upsertsDone = counters.findCounter(group, "Upserts Done").getValue();
+      long parserErrors = counters.findCounter(group, "Parser errors").getValue();
+      long recordErrors = counters.findCounter(group, "Errors on records").getValue();
+      long emptyRecords = counters.findCounter(group, "Empty records").getValue();
+      long totalErrors = parserErrors + recordErrors;
+      long totalProcessed = upsertsDone + totalErrors + emptyRecords;
+
+      // Check absolute max-errors threshold
+      long maxErrors = conf.getLong(FormatToBytesWritableMapper.MAX_ERRORS_CONFKEY, -1L);
+      if (maxErrors >= 0 && totalErrors > maxErrors) {
+        LOGGER.error("Error threshold exceeded: {} total errors, max allowed is {}",
+          totalErrors, maxErrors);
+        return false;
+      }
+
+      // Check percentage threshold
+      String pctStr = conf.get(FormatToBytesWritableMapper.ERROR_THRESHOLD_PCT_CONFKEY);
+      if (pctStr != null && totalProcessed > 0) {
+        double thresholdPct = Double.parseDouble(pctStr);
+        double actualPct = (totalErrors * 100.0) / totalProcessed;
+        if (actualPct > thresholdPct) {
+          LOGGER.error("Error percentage threshold exceeded: {}% errors (threshold: {}%)",
+            String.format("%.2f", actualPct), String.format("%.2f", thresholdPct));
+          return false;
+        }
+      }
+    } catch (Exception e) {
+      LOGGER.warn("Failed to check post-job threshold", e);
+    }
+    return true;
   }
 
   private void completebulkload(Configuration conf, Path outputPath,

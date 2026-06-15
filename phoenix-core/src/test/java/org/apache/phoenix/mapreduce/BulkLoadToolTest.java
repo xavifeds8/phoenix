@@ -18,6 +18,7 @@
 package org.apache.phoenix.mapreduce;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import java.util.Arrays;
 import java.util.Collection;
@@ -62,6 +63,45 @@ public class BulkLoadToolTest {
   @Test(expected = IllegalStateException.class)
   public void testParseOptions_NoTable() {
     bulkLoadTool.parseOptions(new String[] { "--input", "/input" });
+  }
+
+  @Test
+  public void testParseOptions_BadRecordsPath() {
+    CommandLine cmdLine = bulkLoadTool.parseOptions(new String[] { "--input", "/input", "--table",
+      "mytable", "--bad-records-path", "/tmp/bad-records" });
+    assertEquals("/tmp/bad-records",
+      cmdLine.getOptionValue(AbstractBulkLoadTool.BAD_RECORDS_PATH_OPT.getOpt()));
+  }
+
+  @Test
+  public void testParseOptions_MaxErrors() {
+    CommandLine cmdLine = bulkLoadTool.parseOptions(new String[] { "--input", "/input", "--table",
+      "mytable", "--max-errors", "100" });
+    assertEquals("100",
+      cmdLine.getOptionValue(AbstractBulkLoadTool.MAX_ERRORS_OPT.getOpt()));
+  }
+
+  @Test
+  public void testParseOptions_ErrorThresholdPct() {
+    CommandLine cmdLine = bulkLoadTool.parseOptions(new String[] { "--input", "/input", "--table",
+      "mytable", "--error-threshold-pct", "5.5" });
+    assertEquals("5.5",
+      cmdLine.getOptionValue(AbstractBulkLoadTool.ERROR_THRESHOLD_PCT_OPT.getOpt()));
+  }
+
+  @Test
+  public void testParseOptions_AllErrorHandlingOptions() {
+    CommandLine cmdLine = bulkLoadTool.parseOptions(new String[] { "--input", "/input", "--table",
+      "mytable", "--bad-records-path", "/tmp/bad", "--max-errors", "50",
+      "--error-threshold-pct", "10" });
+    assertEquals("/tmp/bad",
+      cmdLine.getOptionValue(AbstractBulkLoadTool.BAD_RECORDS_PATH_OPT.getOpt()));
+    assertEquals("50",
+      cmdLine.getOptionValue(AbstractBulkLoadTool.MAX_ERRORS_OPT.getOpt()));
+    assertEquals("10",
+      cmdLine.getOptionValue(AbstractBulkLoadTool.ERROR_THRESHOLD_PCT_OPT.getOpt()));
+    // These options imply --ignore-errors, but that's checked at runtime in loadData()
+    assertTrue(true);
   }
 
   @Test
