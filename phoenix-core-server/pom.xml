@@ -154,6 +154,14 @@
       <artifactId>commons-csv</artifactId>
     </dependency>
     <dependency>
+      <groupId>org.apache.avro</groupId>
+      <artifactId>avro</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.avro</groupId>
+      <artifactId>avro-mapred</artifactId>
+    </dependency>
+    <dependency>
       <groupId>org.apache.phoenix.thirdparty</groupId>
       <artifactId>phoenix-shaded-commons-cli</artifactId>
     </dependency>
